@@ -1,0 +1,302 @@
+---
+title: "Data Preparation and  Pre Analysis"
+output:
+  html_document:
+    df_print: paged
+---
+# Air Quality In Nairobi (Multivariet Time Series)
+## Members
+- ANDREW KARANJA
+- SUHAYMA ALI HARITH
+- JULIET WANJIRU 
+- HAPPY KULOLA
+- ALEX WAWERU  
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r importing library}
+library(data.table)
+library(tidyverse)
+library(summarytools)
+library(lubridate)
+library(ggplot2)
+#install.packages("leaflet")
+library(leaflet)
+```
+
+```{r function, eval=FALSE}
+Import.Data1=function(list.of.dataframe,number.of.dataframe){
+  
+  Final_Data=NULL
+  
+  for(i in number.of.dataframe){
+    x=list.of.dataframe[[i]]
+    x[,"value"]=apply(x[,"value"],2,as.numeric)
+    x=x %>% 
+      filter(value_type=="humidity" | value_type=="temperature" |
+               value_type=="P1" | value_type=="P2")
+    
+    x$Date=as.Date(x$timestamp,format = "%d/%m/%y")
+    
+    x=aggregate(value~Date+location+value_type,
+          data = x,FUN = mean,na.action = na.omit) %>% 
+    spread(key = value_type,value = value,drop = T)
+      
+    Final_Data=rbind(Final_Data,x)
+  } 
+  return(Final_Data)
+}
+```
+
+
+```{r importing data}
+#Importing a csv files and saving them in form of a list 
+list_dataframe = list.files(path = "Data", pattern = "*.csv") %>%
+  paste("Data/",.,sep = "") %>%
+  lapply(.,function(x) fread(x))
+```
+
+```{r Manipulating data, eval=FALSE}
+a=Sys.time()
+Data=Import.Data1(list_dataframe,1:61)
+b=Sys.time()
+
+#Saving the file for later use and easy accessibility
+write.csv(Data,file = "air_quality.csv")
+```
+
+```{r import the data }
+Air_quality=read.csv("air_quality.csv")
+```
+
+```{r brief view}
+#structure of the data
+str(Air_quality)
+# first 6 rows of the data
+head(Air_quality)
+```
+
+```{r data manupulation}
+#converting  date from character to date format
+Air_quality$Date=as.Date(format(as.Date(Air_quality$Date, format = "%d/%m/%Y"), "%Y/%m/%d"))
+#converting location from integer to factor format
+Air_quality$location=factor(Air_quality$location)
+```
+
+```{r Summary}
+#Summary of Air Quality 
+dfSummary(Air_quality, graph.col = F)
+```
+>2450 rows had missing values where 1887 missing rows were missing temperature and humidity readings while 563 missed P1 and P2 readings the whole day.
+
+## Grouping Data into two locations
+### Cleaning the Data frame
+
+Given that K-mean clustering clusters data using the average distance between them means that it is susceptible to outliers hence before clustering we eliminate outliers from the data   
+```{r Handling outliers}
+# first we assign the imported data a new name
+Data=Air_quality
+#Using the sapply we detect the outliers present in each numeric variable 
+Out=sapply(Data[3:6],function(x) boxplot.stats(x)$out)
+# Next we select values above the extremely lower values and below the extremely high values
+Data1=subset(Data,!(humidity %in% Out$humidity))
+Data1=subset(Data1,!(P1 %in% Out$P1))
+Data1=subset(Data1,!(P2 %in% Out$P2))
+Data1=subset(Data,!(temperature %in% Out$temperature))
+```
+
+
+```{r Relationship between the variables}
+# calculating the correlation to check the association between the numerical variables using complete observation(eliminating rows with missing values)
+cor(Data1[3:6],use='complete.obs')
+
+# computing the association between the numerical variables and location & Date
+# null hypothesis is at 95% CI the temp, humid, p1, and p2 is equal across all points.
+sapply(Data1[3:6],function(x) summary(aov(x~location,data = Data1)))
+
+sapply(Data1[3:6],function(x) summary(aov(x~Date,data = Data1)))
+
+sapply(Data1[3:6],function(x) summary(aov(x~Date*location,data = Data1)))
+```
+
+## Performing Clustering using Kmeans under supervised learning 
+
+We perform clustering with an aim of reducing the number of groups in the data and also to manage missing values. Currently we have 58 location in which are recorded at different times i.e. the data recorded in each point is not consistent based on time. We cluster the data using two variables Temperature and Humidity.(Why this variables: 
+-1 we assume they are independent 
+-2 They have a strong correlation)
+
+```{r geo map}
+Location=NULL
+for(i in 1:length(list_dataframe)){
+  x=list_dataframe[[i]][,3:5] %>% distinct(.keep_all = T)
+  Location=rbind(Location,x)
+}
+
+markers=Location$location
+
+m <- leaflet(Location) %>%
+  addTiles() %>%  # Add default OpenStreetMap map tiles
+  addMarkers(lng=~lon, lat=~lat, popup=paste("Loc",markers))
+m  # Print the map
+```
+
+
+```{r Clustering}
+# Library required for fviz_cluster function
+library(factoextra)
+library(NbClust)
+
+# Creating a data frame with with Temperature and humidity
+df=Data1[c("temperature","humidity")]
+
+# Omitting missing values
+df=na.omit(df)
+ 
+# Scaling dataset
+df=scale(df)
+ 
+# Selection the number of cluster by creating a dissimilarity matrix using euclidean distance
+nClus=NbClust(df, distance = "euclidean", min.nc=2, max.nc=8,
+               method = "complete", index = "ch")
+# selected clusters
+nClus$Best.nc
+
+# performing a K means clustering
+km=kmeans(df, centers = 6, nstart = 25)
+ 
+# Visualize the clusters
+fviz_cluster(km, data = df)
+```
+
+
+### Using the generated Clusters to split the 58 locations into 6 regions
+Testing for association between clusters and location.
+```{r}
+#Test for association between clusters and location
+# Null hypothesis at 95% CI is each cluster represent certain locations
+loc=na.omit(Data1[c('location','temperature')]);loc=loc$location
+chisq.test(loc,km$cluster)
+```
+
+
+In this we used a frequency distribution we grouped the location based on the clusters after.
+
+```{r cluster allocation}
+#Omitting missing values
+Data2=subset(Data1,is.na(Data1$temperature)==F)
+
+#Splitting the 58 locations into 6  regions
+Split=data.frame(Loc=Data2$location,Cluster=km$cluster)
+
+#Create a frequency  table allocating the location based on the clusters
+frq=Split %>% group_by(Cluster,Loc) %>% count()
+
+#Converting location to integer from factor
+frq$Loc=as.vector(frq$Loc)
+
+#allocating all points  with to a cluster with the maximum number of points
+allocated=NULL
+for (i in unique(frq$Loc)) {
+  alloc=subset(frq[which(frq$Loc==i),], n==max(frq[which(frq$Loc==i),]$n))[-3]
+  allocated=rbind(allocated,alloc)
+}
+
+#Creating a new variable in the original data classifying the data into 6 regions
+for(i in 1:6){
+  Clu=allocated$Loc[which(allocated$Cluster==i)]
+  for(j in Clu){
+    Data[which(Data$location==j),"Cluster"]=i
+  }
+}
+head(Data)
+```
+
+```{r geo map cluster}
+y=Data %>% dplyr::select(location,Cluster) %>% distinct(.keep_all = T)
+
+Location=merge(y,Location, by='location',all.x=T)
+
+# Create a palette that maps factor levels to colors
+pal <- colorFactor(c("navy", "red","yellow","green","orange","violet"), 
+                   domain = c(1,2,3,4,5,6))
+
+leaflet(Location) %>% addTiles() %>%
+  addCircleMarkers(lng=~lon, lat=~lat,
+    radius = 10,
+    color = ~pal(Cluster),
+    stroke = FALSE, fillOpacity = 0.7
+  )
+```
+
+
+```{r monitoring the clusters}
+#Due to the present outliers in the original data we use median to compare our  variables 
+Median=Data %>% group_by(Cluster) %>% 
+  summarise(Temp=median(temperature,na.rm = T),
+                                         Humid=median(humidity,na.rm = T),
+                                         p1=median(P1,na.rm = T),
+                                         p2=median(P2,na.rm = T))
+Median
+Corr=Median[-7,-1] %>% cor(use = "complete.obs")
+corrplot::corrplot(Corr)
+```
+
+
+```{r aggregated data based on cluster}
+New_Data=Data %>% group_by(Date,Cluster) %>% filter(is.na(Cluster)!=T) %>% 
+  mutate(Temp=mean(temperature,na.rm = T),
+                                         Humid=mean(humidity,na.rm = T),
+                                         p1=mean(P1,na.rm = T),
+                                         p2=mean(P2,na.rm = T)) %>% 
+  dplyr::select(Date,Cluster,Temp,Humid,p1,p2) %>% distinct(.keep_all = T)
+```
+
+>Given that Temp and humidity are inversly propotioned based on the correlation analysis done above we will two extreme regions one with the highest temp lowest humidity and the other with lowest temp and high humidity. Based on the median we will select point 4 and 2
+
+```{r selecting one extreme point}
+#Selecting region one with the highest temperature 
+clust1=Median[which(Median$Temp==max(Median$Temp,na.rm = T)),"Cluster"]$Cluster
+Region_1= subset(New_Data,Cluster==clust1)[-2]
+head(Region_1)
+
+#Selecting region one with the lowest temperature 
+clust2=Median[which(Median$Temp==min(Median$Temp,na.rm = T)),"Cluster"]$Cluster
+Region_2= subset(New_Data,Cluster==clust2)[-2]
+head(Region_2)
+```
+
+```{r}
+# Create a palette that maps factor levels to colors
+pal <- colorFactor(c("red","blue"), 
+                   domain = c(clust1,clust2))
+
+leaflet(subset(Location,Cluster==clust1 | Cluster==clust2)) %>% addTiles() %>%
+  addCircleMarkers(lng=~lon, lat=~lat,
+    radius = 20,
+    color = ~pal(Cluster),
+    stroke = FALSE, fillOpacity = 0.7
+  )
+```
+
+### Summary {.tabset}
+```{r Region 1}
+dfSummary(data.frame(Region_1),graph.col = F)
+```
+
+```{r Region 2}
+dfSummary(data.frame(Region_2),graph.col = F)
+```
+
+## Creating new data for regions with complete consistent dates
+```{r new df with complete dates,eval=FALSE}
+Date=seq(min(Air_quality$Date), max(Air_quality$Date), "day")
+Region_1=merge(data.frame(Date=Date),Region_1,all.x = T)
+Region_2=merge(data.frame(Date=Date),Region_2,all.x = T)
+
+write.csv(Region_1,file = "Region A.csv",row.names = F)
+
+write.csv(Region_2,file = "Region B.csv",row.names = F)
+```

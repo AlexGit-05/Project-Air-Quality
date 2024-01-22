@@ -1,0 +1,358 @@
+---
+title: "Air Quality :VAR MODEL"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+---
+## Members
+- ANDREW KARANJA
+- SUHAYMA ALI HARITH
+- JULIET WANJIRU 
+- HAPPY KULOLA
+- ALEX WAWERU  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r libraries, include=FALSE}
+library(summarytools)
+library(tidyverse)
+library(VIM)
+library(lubridate)
+library(tseries)
+library(lmtest)
+library(fUnitRoots)
+library(forecast)
+library(imputeTS)
+library(vars)
+library(ggplot2)
+```
+
+# Importing Data {.tabset}
+## Region 1
+```{r importing data}
+Region_1=read.csv("Region A.csv")
+head(Region_1,4)
+#Selecting the data from the first day we had an active reading in region 1
+Region_1=Region_1[281:length(Region_1$Date),]
+```
+
+## Region 2
+```{r}
+Region_2=read.csv("Region B.csv")
+head(Region_2,4)
+#Selecting the data from the first day we had an active reading in region 2
+Region_2=Region_2[66:length(Region_2$Date),]
+```
+
+>The days containing missing values indicate that that particlular day no data was collected in that region
+
+# EDA {.tabset}
+## Region 1
+```{r summary of the data}
+summarytools::view(dfSummary(Region_1,graph.col = F))
+```
+
+## Region 2
+```{r}
+summarytools::view(dfSummary(Region_2,graph.col = F))
+```
+
+# Data Manipulation {.tabset}
+Creating new variables extracted from date and reshaping the data 
+```{r}
+#Creating a data frame
+Data=rbind(data.frame(Region_1,Region=rep("A",length(Region_1$Date))),
+           data.frame(Region_2,Region=rep("B",length(Region_2$Date))))
+
+#Creating a variable day
+Data$Day=lubridate::wday(Data$Date,label = T)
+
+#Creating a variable month
+Data$Month=lubridate::month(Data$Date,label = T)
+
+#Creating a variable year
+Data$Year=factor(lubridate::year(Data$Date))
+
+#Reshaping the data
+Data=Data %>% gather('Value_Type','Value',
+                             -c('Date','Day','Month','Year','Region'))
+
+```
+
+## Removing Outliers
+```{r}
+R=unique(Data$Region)
+Vt=unique(Data$Value_Type)
+
+for(i in R){
+  for (j in Vt) {
+   Outlier=boxplot.stats(Data$Value[which(Data$Region==paste(i) & 
+                                 Data$Value_Type==paste(j))])$out
+   Data = Data %>% filter(!(Value %in% Outlier))
+  }
+}
+```
+
+# Distribution {.tabset}
+## Temperature 
+```{r}
+Data %>% filter(Value_Type=="Temp") %>% 
+  ggplot(aes(Value)) + 
+  geom_density(col="red") +
+  theme_dark() +
+  ggtitle("Temperatures Distribution")
+  
+```
+
+## Humidity 
+```{r}
+Data %>% filter(Value_Type=="Humid") %>% 
+  ggplot(aes(Value)) + 
+  geom_density(col="blue") +
+  theme_dark()+
+  ggtitle("Humidity Distribution")
+  
+```
+
+## Particulate matter 1
+```{r}
+Data %>% filter(Value_Type=="p1") %>% 
+  ggplot(aes(Value)) + 
+  geom_density(col="green") +
+  theme_dark()+
+  ggtitle("Particulate matter 1 Distribution")
+  
+```
+
+## Particulate matter 1
+```{r}
+Data %>% filter(Value_Type=="p2") %>% 
+  ggplot(aes(Value)) + 
+  geom_density(col="yellow") +
+  theme_dark()+
+  ggtitle("Particulate matter 2 Distribution")
+  
+```
+
+# Visualization {.tabset}
+## Yearly Analysis 
+```{r Year}
+Data %>% #filter(Value_Type=="Temp") %>% 
+  ggplot(aes(x=Year,y=Value,fill=Value_Type)) +
+  geom_boxplot() +
+  facet_wrap(~Region)
+```
+
+## Monthly Analysis
+```{r Month}
+Data %>% #filter(Value_Type=="Temp") %>%   
+  ggplot(aes(x=Month,y=Value,fill=Value_Type)) +
+  geom_boxplot() +
+  facet_wrap(~Region) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust=1))
+```
+
+## Daily Analysis
+```{r Day}
+Data %>% ggplot(aes(x=Day,y=Value,fill=Value_Type)) +
+  geom_boxplot() +
+  facet_wrap(~Region)
+```
+## Table
+```{r}
+Tab=Data %>% group_by(Value_Type,Region,Month) %>% 
+         summarise(Value=median(Value,na.rm=T),.groups = "keep") %>%
+  spread(Value_Type,Value)
+
+Tab %>% filter(Region=="A") %>% ggplot(aes(x=Month)) + 
+  geom_point(aes(y=Temp,col="Temp")) +
+  geom_point(aes(y=Humid,col="Humid")) +
+  geom_point(aes(y=p1,col="P2.5")) +
+  geom_point(aes(y=p2,col="p10")) +
+  ggtitle("Region A Median Recorded Value per Month")
+
+Tab %>% filter(Region=="B") %>% ggplot(aes(x=Month)) + 
+  geom_point(aes(y=Temp,col="Temp")) +
+  geom_point(aes(y=Humid,col="Humid")) +
+  geom_point(aes(y=p1,col="P2.5")) +
+  geom_point(aes(y=p2,col="p10"))+
+  ggtitle("Region A Median Recorded Value per Month")
+```
+
+---
+
+# Vector Auto-Regression (VAR)
+
+## Converting data to a time series
+```{r}
+Region_1ts=ts(Region_1[-1],frequency = 365,
+              start = c(2018,282))
+
+Region_2ts=ts(Region_2[-1],frequency = 365,
+              start = c(2018,67))
+```
+
+## Replacing outliers present in the two regions time series data
+```{r outlier}
+#Detecting outliers and replacing them
+for(i in 1:4){
+  uni=Region_1ts[,i]
+  for(j in 1:length(tsoutliers(uni)$index)){
+    Region_1ts[tsoutliers(uni)$index[j],i]=tsoutliers(uni)$replacements[j]
+  }
+}
+
+for(i in 1:4){
+  uni=Region_2ts[,i]
+  for(j in 1:length(tsoutliers(uni)$index)){
+    Region_2ts[tsoutliers(uni)$index[j],i]=tsoutliers(uni)$replacements[j]
+  }
+}
+```
+
+## Handling missing values {.tabset}
+### Region 1
+```{r }
+# Visualization
+any(is.na(Region_1))
+
+colSums(is.na(Region_1))
+
+aggr(Region_1, col=c('navyblue','yellow'),
+                    numbers=TRUE, sortVars=TRUE,
+                    labels=names("Region 1"), cex.axis=.7,
+                    gap=3, ylab=c("Missing data","Pattern"))
+
+
+plot(Region_1ts, main="Region 1 Before Imputation")
+
+# Missing values imputation
+Region_1imputed=na_seadec(Region_1ts)
+
+#After Imputation
+plot(Region_1imputed, main="Region 1 After Imputation")
+```
+
+### Region 2
+```{r }
+# Visualization
+any(is.na(Region_2))
+
+colSums(is.na(Region_2))
+
+aggr(Region_2, col=c('navyblue','yellow'),
+                    numbers=TRUE, sortVars=TRUE,
+                    labels=names("Region 2"), cex.axis=.7,
+                    gap=3, ylab=c("Missing data","Pattern"))
+# Before imputation
+plot(Region_2ts, main="Region 2 Before Imputation")
+
+# Missing values imputation
+Region_2imputed=na_seadec(Region_2ts)
+
+#After Imputation
+plot(Region_2imputed, main="Region 2 After Imputation")
+```
+
+
+## Granger’s Causality Test
+```{r}
+#Test of causality between Temp and humidity
+grangertest(Region_1imputed[,1],Region_1imputed[,2],order = 2)$`Pr(>F)`
+grangertest(Region_2imputed[,1],Region_2imputed[,2],order = 2)$`Pr(>F)`
+
+#Test of causality between P1 and P2
+grangertest(Region_1imputed[,4],Region_1imputed[,3],order = 2)$`Pr(>F)`
+grangertest(Region_2imputed[,4],Region_2imputed[,3],order = 2)$`Pr(>F)`
+
+#Test of causality between humid and P1
+grangertest(Region_1imputed[,2],Region_1imputed[,3],order = 2)$`Pr(>F)`
+grangertest(Region_2imputed[,2],Region_2imputed[,3],order = 2)$`Pr(>F)`
+```
+
+
+## Test Stationarity {.tabset}
+
+### Region 1
+Augmented Dickey-Fuller test for the null hypothesis that x is non-stationary.
+```{r Dicky Fuller Test,decomposition and detrending 1 }
+lapply(Region_1imputed,adfTest,lags=1,type="nc")
+
+## Decomposition
+autoplot(decompose(Region_1imputed[,1]),main="Temperature")
+autoplot(decompose(Region_1imputed[,2]),main="Humidity")
+autoplot(decompose(Region_1imputed[,3]),main="P1")
+autoplot(decompose(Region_1imputed[,4]),main="P2")
+
+## Differencing
+Region1_diff=diff(Region_1imputed,lag = 1)
+
+autoplot(decompose(Region1_diff[,1]),main="Temperature")
+autoplot(decompose(Region1_diff[,2]),main="Humidity")
+autoplot(decompose(Region1_diff[,3]),main="P1")
+autoplot(decompose(Region1_diff[,4]),main="P2")
+
+acf(Region1_diff)
+```
+
+Since the p-values > 0.05, we conclude that there is no enough evidence to reject the Null hypothesis, meaning that the time series is non-stationary.
+
+### Region 2
+```{r Dicky Fuller Test,decomposition and detrending 2}
+lapply(Region_2imputed,adfTest,lags=1, type="nc")
+
+## Decomposition
+autoplot(decompose(Region_2imputed[,1]),main="Temperature")
+autoplot(decompose(Region_2imputed[,2]),main="Humidity")
+autoplot(decompose(Region_2imputed[,3]),main="P1")
+autoplot(decompose(Region_2imputed[,4]),main="P2")
+
+## Differencing
+Region2_diff=diff(Region_2imputed,lag = 1)
+
+autoplot(decompose(Region2_diff[,1]),main="Temperature")
+autoplot(decompose(Region2_diff[,2]),main="Humidity")
+autoplot(decompose(Region2_diff[,3]),main="P1")
+autoplot(decompose(Region2_diff[,4]),main="P2")
+
+acf(Region2_diff)
+```
+
+Since the p-values < 0.05, we conclude that there is enough evidence to reject the Null hypothesis, meaning that the time series is stationary.
+
+## Model {.tabset}
+### Region 1
+```{r Model1}
+Model_1=VAR(Region_1imputed,p=1,type = "const", season = 12)
+summary(Model_1)
+
+#residual diagnostics
+serial.test(Model_1)
+arch.test(Model_1)
+
+fcast = predict(Model_1, n.ahead = 5)
+fcast
+
+var_forecast = forecast(Model_1, h=30)
+autoplot(var_forecast, main="VAR Forecast", xlab="Date")
+```
+
+### Region 2
+```{r Model2}
+Model_2=VAR(Region_2imputed,p=1,type = "const", season = 12)
+summary(Model_2) 
+
+#residual diagnostics
+serial.test(Model_2)
+arch.test(Model_2)
+
+fcast = predict(Model_2, n.ahead = 5)
+fcast
+
+var_forecast = forecast(Model_2, h=30)
+autoplot(var_forecast, main="VAR Forecast", xlab="Date")
+
+```
